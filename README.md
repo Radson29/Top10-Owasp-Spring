@@ -4,7 +4,7 @@
 ## A01:2021 Broken Access Control
 
 <details>
-<summary> 🔴 1. Zagrożenia związane z lokalnym włączeniem plików (Local File Inclusion, LFI)</summary>
+<summary> 🔴 1. Local File Inclusion, LFI</summary>
 
 ### Opis
 Local File Inclusion (LFI) to podatność umożliwiająca nieautoryzowany dostęp do lokalnych plików na serwerze. W Springu może wystąpić, gdy dane wejściowe użytkownika są przekazywane bez walidacji jako ścieżka do pliku i używane do dynamicznego ładowania zasobów za pomocą klas takich jak `Files` czy `Paths`.
@@ -81,7 +81,7 @@ public ResponseEntity<String> loadFile(@RequestParam String fileName) throws IOE
 </details>
 
 <details>
-<summary> 🔴 2. Zagrożenia związane z dostępem do obiektów poprzez middleware (Object access middleware)</summary>
+<summary> 🔴 2. Object access middleware</summary>
 
 ### Opis
 Podatności w Springu związane z dostępem do obiektów mogą wystąpić, gdy brak jest walidacji danych użytkownika lub kontroli dostępu. Przykładowo, brak weryfikacji użytkownika przy pobieraniu danych za pomocą metod serwisowych może prowadzić do eskalacji uprawnień.
@@ -151,7 +151,7 @@ public ResponseEntity<UserData> getUserData(@RequestParam Long userId, Principal
 </details>
 
 <details>
-<summary>3. Zagrożenia związane z masowym przypisywaniem (Mass Assignment)</summary>
+<summary>3. Mass Assignment</summary>
 
 ### Opis
 Mass Assignment w Springu może wystąpić, gdy dane wejściowe są mapowane bezpośrednio na obiekt modelu (np. `@RequestBody`). Przykładowo, użytkownik może manipulować przesyłanymi danymi, aby zmienić pola, do których nie powinien mieć dostępu.
@@ -1248,3 +1248,626 @@ public class LoginController {
 
 
 </details>
+
+## A05:2021 Security Misconfiguration
+
+<details>
+<summary>🔴 1. Token/Cookie no expire </summary>
+
+### Opis
+Podatność występuje, gdy tokeny JWT lub ciasteczka sesyjne są generowane bez ustawionego czasu wygaśnięcia (`expiration time`) lub zbyt długim czasem ważności. W przypadku JWT brak pola `exp` w payloadzie, a w przypadku ciasteczek brak atrybutów `Expires` lub `Max-Age`. Tokeny takie pozostają ważne bezterminowo, co stanowi poważne zagrożenie bezpieczeństwa w przypadku ich przechwycenia.
+
+---
+
+### Przykład podatności
+```java
+public String generateToken(String username) {
+    // Token JWT bez ustawionego czasu wygaśnięcia
+    return Jwts.builder()
+            .setSubject(username)
+            .signWith(SignatureAlgorithm.HS512, SECRET_KEY)
+            .compact();
+}
+```
+
+**Dlaczego podatny?**  
+- Brak ustawionego pola `exp` powoduje, że token pozostaje ważny bezterminowo.
+- W przypadku przechwycenia tokenu atakujący może używać go bez ograniczeń.
+
+---
+
+### Skutki
+- **Przechwycone tokeny/cookie mogą być używane bezterminowo.**
+- **Brak możliwości wymuszenia ponownego logowania.**
+- **Zwiększone ryzyko ataków związanych z kradzieżą sesji.**
+- **Problemy z unieważnieniem sesji po zmianie uprawnień użytkownika.**
+
+---
+
+### Zalecenia
+1. **Ustawienie daty wygaśnięcia w tokenach JWT**:
+   ```java
+   public String generateToken(String username) {
+       Date now = new Date();
+       Date expiryDate = new Date(now.getTime() + 3600000); // 1 godzina
+
+       return Jwts.builder()
+               .setSubject(username)
+               .setIssuedAt(now)
+               .setExpiration(expiryDate) // Dodaj czas wygaśnięcia
+               .signWith(SignatureAlgorithm.HS512, SECRET_KEY)
+               .compact();
+   }
+   ```
+
+   **Dlaczego bezpieczne?**  
+   - Token automatycznie traci ważność po określonym czasie, co minimalizuje ryzyko jego nadużycia.
+
+2. **Ustawienie daty wygaśnięcia dla ciasteczek**:
+   ```java
+   @RestController
+   public class CookieController {
+
+       @PostMapping("/set-cookie")
+       public ResponseEntity<Void> setCookie(HttpServletResponse response) {
+           Cookie cookie = new Cookie("sessionId", "randomSessionValue");
+           cookie.setHttpOnly(true);
+           cookie.setSecure(true);
+           cookie.setMaxAge(3600); // Czas wygaśnięcia 1 godzina
+           response.addCookie(cookie);
+           return ResponseEntity.ok().build();
+       }
+   }
+   ```
+
+   **Dlaczego bezpieczne?**  
+   - Ogranicza czas życia ciasteczka, zmniejszając ryzyko jego wykorzystania w przypadku przechwycenia.
+
+3. **Unieważnienie tokenów po zmianie uprawnień**:
+   - Użyj bazy danych lub systemu zarządzania sesjami, aby przechowywać aktywne tokeny i weryfikować ich ważność.
+
+4. **Regularne odświeżanie tokenów (Refresh Tokens)**:
+   - Wprowadź mechanizm odświeżania tokenów, aby ograniczyć czas życia tokenów dostępowych.
+  
+### Mechanizmy Spring Security
+1. **Automatyczne zarządzanie sesjami**:
+   - Spring Security zapewnia automatyczne zarządzanie sesjami, co umożliwia wymuszanie wygasania sesji:
+     ```java
+     @Configuration
+     public class SecurityConfig {
+
+         @Bean
+         public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+             http.sessionManagement()
+                     .invalidSessionUrl("/login?expired=true")
+                     .maximumSessions(1) // Ograniczenie do jednej aktywnej sesji na użytkownika
+                     .expiredUrl("/login?expired=true"); // Przekierowanie po wygaśnięciu sesji
+             return http.build();
+         }
+     }
+     ```
+
+   **Dlaczego bezpieczne?**  
+   - Pozwala ograniczyć liczbę aktywnych sesji dla jednego użytkownika i wymusza ich unieważnienie.
+
+2. **Weryfikacja daty wygaśnięcia tokenów JWT**:
+   - Zaimplementuj filtr weryfikujący datę wygaśnięcia tokenów:
+     ```java
+     @Component
+     public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+         @Override
+         protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+                 throws ServletException, IOException {
+             String token = request.getHeader("Authorization");
+             if (token != null && !isTokenExpired(token)) {
+                 // Token ważny - kontynuacja przetwarzania
+             } else {
+                 response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+             }
+             chain.doFilter(request, response);
+         }
+
+         private boolean isTokenExpired(String token) {
+             Claims claims = Jwts.parser().setSigningKey(SECRET_KEY).parseClaimsJws(token).getBody();
+             return claims.getExpiration().before(new Date());
+         }
+     }
+     ```
+
+   **Dlaczego bezpieczne?**  
+   - Uniemożliwia używanie tokenów po ich wygaśnięciu, wymuszając ponowne logowanie.
+
+
+</details>
+
+<details>
+<summary>🔴 2. Distributed Denial of Service (DDoS)</summary>
+
+### Opis
+Ataki typu Distributed Denial of Service (DDoS) polegają na zalewaniu serwera ogromną liczbą żądań z wielu źródeł, co powoduje wyczerpanie zasobów i brak dostępności usługi dla normalnych użytkowników. W kontekście Spring Framework ochrona przed DDoS może być realizowana poprzez różne techniki, takie jak filtrowanie ruchu, dynamiczne blokowanie adresów IP oraz ograniczanie przepustowości.
+
+---
+
+### Przykład podatności
+```java
+@RestController
+public class ExampleController {
+
+    @GetMapping("/data")
+    public ResponseEntity<String> fetchData() {
+        // Brak ograniczeń liczby żądań, co pozwala na zalewanie serwera
+        return ResponseEntity.ok("Data fetched successfully");
+    }
+}
+```
+
+**Dlaczego podatny?**  
+- Brak jakiegokolwiek mechanizmu kontrolującego liczbę żądań lub ich źródło.
+- Atakujący może wysyłać nieograniczoną liczbę żądań, co prowadzi do przeciążenia serwera.
+
+---
+
+### Skutki
+- Niedostępność usługi dla normalnych użytkowników.
+- Wyczerpanie zasobów serwera, takich jak CPU, pamięć czy przepustowość sieci.
+- Potencjalne zwiększenie kosztów operacyjnych (np. w modelach chmurowych).
+
+---
+
+### Zalecenia
+1. **Implementacja dynamicznego filtrowania ruchu**:
+   - Przykład kodu dynamicznie ograniczającego liczbę żądań z tego samego adresu IP:
+     ```java
+     @Component
+     @Order(1)
+     public class RateLimitFilter implements Filter {
+
+         private final ConcurrentHashMap<String, AtomicLong> requestCount = new ConcurrentHashMap<>();
+         private final long rateLimit = 10; // Maksymalna liczba żądań na okres czasu
+
+         @Override
+         public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain) throws IOException, ServletException {
+             String ipAddress = request.getRemoteAddr();
+             AtomicLong count = requestCount.computeIfAbsent(ipAddress, k -> new AtomicLong());
+
+             // Sprawdzenie, czy liczba żądań przekracza limit
+             if (count.incrementAndGet() > rateLimit) {
+                 HttpServletResponse httpResponse = (HttpServletResponse) response;
+                 httpResponse.setStatus(HttpServletResponse.SC_TOO_MANY_REQUESTS);
+                 httpResponse.getWriter().write("Rate limit exceeded. Please try again later.");
+                 return;
+             }
+
+             chain.doFilter(request, response);
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Działa na poziomie filtrów HTTP, rejestrując liczbę żądań na podstawie adresu IP.
+     - Blokuje adresy IP, które przekroczą zdefiniowany limit żądań.
+
+---
+
+### Mechanizmy Spring Security
+
+1. **Konfiguracja timeoutów w Spring Boot**:
+   - Ustaw odpowiednie timeouty dla żądań HTTP:
+     ```properties
+     server.connection-timeout=5000
+     spring.mvc.async.request-timeout=5000
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Ogranicza czas przetwarzania żądań, co zapobiega blokowaniu zasobów przez długotrwałe żądania.
+
+</details>
+
+<details>
+<summary>🔴 3. TLS force/HSTS</summary>
+
+### Opis
+TLS (Transport Layer Security) zapewnia szyfrowanie danych przesyłanych pomiędzy klientem a serwerem, chroniąc je przed przechwyceniem (np. w atakach typu Man-in-the-Middle). Brak wymuszania TLS lub brak nagłówka HSTS (HTTP Strict Transport Security) w odpowiedziach HTTP może pozwolić na przesyłanie danych w sposób niezaszyfrowany, co stanowi zagrożenie dla bezpieczeństwa aplikacji.
+
+---
+
+### Przykład podatności
+```java
+@RestController
+public class ExampleController {
+
+    @GetMapping("/data")
+    public ResponseEntity<String> fetchData() {
+        // Brak zabezpieczenia transmisji TLS
+        return ResponseEntity.ok("Sensitive data");
+    }
+}
+```
+
+**Dlaczego podatny?**  
+- Jeśli aplikacja dopuszcza komunikację za pomocą HTTP zamiast HTTPS, dane są przesyłane w sposób niezaszyfrowany.
+- Brak nagłówka HSTS umożliwia ataki typu downgrade, w których użytkownik jest przekierowany do nieszyfrowanej wersji aplikacji.
+
+---
+
+### Skutki
+- Możliwość przechwycenia wrażliwych danych przez atakujących.
+- Ataki typu Man-in-the-Middle (MITM) i downgrade protokołu.
+- Naruszenie poufności danych użytkowników.
+
+---
+
+### Zalecenia
+1. **Wymuszenie HTTPS w konfiguracji Spring Security**:
+   - Skonfiguruj `HttpSecurity`, aby wymusić HTTPS:
+     ```java
+     @Configuration
+     public class SecurityConfig {
+
+         @Bean
+         public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+             http.requiresChannel()
+                 .anyRequest()
+                 .requiresSecure(); // Wymusza HTTPS na wszystkich żądaniach
+             return http.build();
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Zapewnia, że wszystkie żądania są przesyłane przez HTTPS, eliminując możliwość przesyłania danych w sposób niezaszyfrowany.
+
+2. **Dodanie nagłówka HSTS**:
+   - Konfiguracja Spring Security, aby automatycznie dodawać nagłówek HSTS:
+     ```java
+     @Configuration
+     public class SecurityConfig {
+
+         @Bean
+         public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+             http.headers()
+                 .httpStrictTransportSecurity()
+                 .includeSubDomains(true)
+                 .maxAgeInSeconds(31536000); // 1 rok
+             return http.build();
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - HSTS wymusza, aby przeglądarka zawsze korzystała z HTTPS, nawet jeśli użytkownik ręcznie wpisze adres HTTP.
+
+3. **Konfiguracja SSL/TLS w Spring Boot**:
+   - Skonfiguruj certyfikat SSL w `application.properties`:
+     ```properties
+     server.ssl.key-store=classpath:keystore.p12
+     server.ssl.key-store-password=yourPassword
+     server.ssl.key-store-type=PKCS12
+     server.port=8443
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Certyfikat SSL/TLS zapewnia szyfrowanie transmisji danych między klientem a serwerem.
+
+4. **Przekierowanie HTTP do HTTPS**:
+   - Dodaj regułę przekierowania w serwerze aplikacji (np. Tomcat, Nginx) lub konfiguracji Spring Boot:
+     ```java
+     @Configuration
+     public class HttpToHttpsRedirectConfig {
+
+         @Bean
+         public WebServerFactoryCustomizer<TomcatServletWebServerFactory> redirectConfig() {
+             return factory -> factory.addAdditionalTomcatConnectors(httpToHttpsRedirectConnector());
+         }
+
+         private Connector httpToHttpsRedirectConnector() {
+             Connector connector = new Connector(TomcatServletWebServerFactory.DEFAULT_PROTOCOL);
+             connector.setScheme("http");
+             connector.setPort(8080);
+             connector.setSecure(false);
+             connector.setRedirectPort(8443);
+             return connector;
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Automatycznie przekierowuje użytkowników korzystających z HTTP do HTTPS, eliminując ryzyko przesyłania danych w sposób niezaszyfrowany.
+
+5. **Monitorowanie protokołu TLS**:
+   - Regularnie weryfikuj używane wersje TLS (zaleca się korzystanie z TLS 1.2 lub nowszego).
+
+---
+
+### Mechanizmy Spring Security
+1. **Włączenie nagłówków zabezpieczających**:
+   - Spring Security automatycznie dodaje nagłówki zabezpieczające, takie jak `Strict-Transport-Security`, `X-Content-Type-Options`, i `X-Frame-Options`, zwiększając ochronę aplikacji.
+
+2. **Obsługa certyfikatów klienta**:
+   - Spring Security umożliwia wymuszanie uwierzytelniania TLS na podstawie certyfikatów klienta w konfiguracji.
+
+
+</details>
+
+<details>
+<summary>🔴 4. Debug Mode Enabled</summary>
+
+### Opis
+Debug Mode to tryb diagnostyczny, który ujawnia szczegółowe informacje o aplikacji, takie jak konfiguracja serwera, stacktrace, szczegóły bazy danych czy dane środowiskowe. Włączenie trybu debugowania w środowisku produkcyjnym stanowi poważne zagrożenie bezpieczeństwa, ponieważ te informacje mogą być wykorzystane przez atakujących.
+
+---
+
+### Przykład podatności
+```java
+@RestController
+@ControllerAdvice
+public class DebugController {
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<String> handleException(Exception ex) {
+        // Wyświetlanie pełnego stacktrace w odpowiedzi
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ex.toString());
+    }
+
+    @GetMapping("/debug")
+    public ResponseEntity<String> debugEndpoint() {
+        // Ujawnienie szczegółowych informacji o serwerze
+        return ResponseEntity.ok("Debug Mode Enabled: Environment = " + System.getenv());
+    }
+}
+```
+
+**Dlaczego podatny?**  
+- Wyświetlanie stacktrace i danych środowiskowych ujawnia szczegóły implementacji aplikacji i serwera.
+- Atakujący może wykorzystać te informacje do przeprowadzenia dalszych ataków, takich jak SQL Injection, RCE lub inne.
+
+---
+
+### Skutki
+- Ujawnienie poufnych informacji o systemie, takich jak zmienne środowiskowe, dane bazy danych, wersje bibliotek czy szczegóły konfiguracji.
+- Możliwość wykorzystania tych informacji przez atakujących do przeprowadzenia dalszych ataków.
+- Naruszenie zasad bezpieczeństwa danych.
+
+---
+
+### Zalecenia
+1. **Wyłącz debug mode w środowisku produkcyjnym**:
+   - W pliku `application.properties` lub `application.yml` ustaw debugowanie jako wyłączone:
+     ```properties
+     spring.devtools.restart.enabled=false
+     spring.main.banner-mode=off
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Zapobiega wyświetlaniu szczegółowych informacji diagnostycznych w środowisku produkcyjnym.
+
+
+2. **Testowanie w środowisku testowym**:
+   - Debug mode może być używany wyłącznie w środowisku testowym lub deweloperskim poprzez różnicowanie konfiguracji:
+     ```properties
+     # application-dev.properties
+     spring.devtools.restart.enabled=true
+     spring.main.banner-mode=console
+
+     # application-prod.properties
+     spring.devtools.restart.enabled=false
+     spring.main.banner-mode=off
+     ```
+
+---
+
+### Mechanizmy Spring Security
+1. **Kontrola dostępu do endpointów diagnostycznych**:
+   - Ogranicz dostęp do wrażliwych endpointów (np. /actuator) wyłącznie dla administratorów:
+     ```java
+     @Configuration
+     public class SecurityConfig {
+
+         @Bean
+         public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+             http.authorizeRequests()
+                 .antMatchers("/actuator/**").hasRole("ADMIN") // Tylko dla administratorów
+                 .anyRequest().authenticated();
+             return http.build();
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Uniemożliwia nieautoryzowanym użytkownikom dostęp do wrażliwych danych diagnostycznych.
+
+2. **Ukrycie szczegółowych informacji o błędach**:
+   - W Spring Security możesz włączyć niestandardową stronę błędu:
+     ```java
+     @Configuration
+     public class SecurityConfig {
+
+         @Bean
+         public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+             http.exceptionHandling()
+                 .accessDeniedPage("/error/access-denied");
+             return http.build();
+         }
+     }
+     ```
+
+     **Dlaczego bezpieczne?**  
+     - Zapewnia, że szczegóły błędów są ukryte przed użytkownikiem.
+
+</details>
+
+## A09:2021 Security Logging and Monitoring Failures
+<details>
+<summary>Wprowadzenie do logowania w Spring Framework</summary>
+    
+### Spring Framework domyślnie obsługuje logowanie za pomocą popularnych bibliotek takich jak SLF4J i Logback. Logi są zapisywane w konsoli lub w plikach, w zależności od konfiguracji. Aby włączyć logowanie do plików, wystarczy skonfigurować `application.properties` lub `logback.xml`.
+
+#### Domyślne ustawienia logowania
+Spring Boot ma wbudowaną konfigurację logowania, która zapisuje logi na poziomie `INFO`. W aplikacji Spring Boot logi można znaleźć w konsoli, chyba że skonfigurowano je do zapisywania w pliku.
+
+#### Przykład konfiguracji logowania
+1. **Logi w pliku za pomocą `application.properties`:**
+   ```properties
+   logging.file.name=app.log  # Ścieżka do pliku z logami
+   logging.level.root=INFO    # Poziom logowania (DEBUG, INFO, WARN, ERROR)
+   logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} - %msg%n
+   logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
+   ```
+
+2. **Konfiguracja za pomocą `logback.xml`:**
+   ```xml
+   <configuration>
+       <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+           <file>app.log</file>
+           <encoder>
+               <pattern>%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n</pattern>
+           </encoder>
+       </appender>
+       <root level="INFO">
+           <appender-ref ref="FILE" />
+       </root>
+   </configuration>
+   ```
+#### W Javie istnieje możliwość logowania za pomocą wbudowanej klasy java.util.logging.Logger, która jest częścią standardowej biblioteki Javy. Jednak w nowoczesnych aplikacjach rzadko używa się tej metody, ponieważ oferuje ograniczone możliwości w porównaniu z popularnymi bibliotekami logowania, takimi jak SLF4J, Logback czy Log4j. 
+</details>
+
+<details>
+<summary>🔴 1. Password in Logs</summary>
+
+### Opis
+Zapisanie hasła w logach może prowadzić do naruszenia bezpieczeństwa, jeśli logi dostaną się w niepowołane ręce. Może to być efektem logowania pełnych treści żądań lub odpowiedzi HTTP, które zawierają dane uwierzytelniające.
+
+---
+
+### Przykład podatności
+```java
+@PostMapping("/login")
+public ResponseEntity<String> login(@RequestBody LoginRequest loginRequest) {
+    log.info("User attempting login with password: {}", loginRequest.getPassword());
+    return ResponseEntity.ok("Login successful");
+}
+```
+
+**Dlaczego podatny?**  
+- Logowanie hasła wprost w logach powoduje, że dane uwierzytelniające są widoczne dla osób z dostępem do plików logów.
+
+---
+
+### Zalecenia
+1. **Unikaj logowania danych uwierzytelniających**:
+   ```java
+   log.info("User attempting login with username: {}", loginRequest.getUsername());
+   ```
+
+2. **Maskowanie poufnych danych**:
+   - Użyj maskowania, aby ukryć hasło:
+     ```java
+     log.info("User attempting login with password: *****");
+     ```
+
+---
+
+</details>
+
+<details>
+<summary>🔴 2. Logging Enabled</summary>
+
+### Opis
+Brak włączonego logowania lub niewystarczające logowanie może utrudnić wykrywanie incydentów bezpieczeństwa. Logowanie powinno być zawsze włączone w środowisku produkcyjnym, z odpowiednio dobranym poziomem logowania.
+
+---
+
+### Przykład podatności
+- Brak logowania zdarzeń związanych z bezpieczeństwem, takich jak nieudane próby logowania, zmiany uprawnień czy podejrzane operacje.
+
+---
+
+### Zalecenia
+1. **Włącz logowanie zdarzeń krytycznych**:
+   - Loguj zdarzenia takie jak próby logowania, zmiany danych użytkownika czy błędy aplikacji:
+     ```java
+     log.warn("Failed login attempt for user: {}", username);
+     log.info("User {} changed their password", username);
+     ```
+
+2. **Korzystaj z odpowiedniego poziomu logowania**:
+   - Ustaw poziom logowania na `INFO` lub `WARN` dla zdarzeń krytycznych.
+
+---
+
+</details>
+
+<details>
+<summary>🔴 3. No Logs Exposed to User</summary>
+
+### Opis
+Eksponowanie logów użytkownikowi może ujawnić wrażliwe informacje o systemie, takie jak stacktrace, szczegóły implementacji czy inne dane diagnostyczne.
+
+---
+
+### Przykład podatności
+```java
+@ExceptionHandler(Exception.class)
+public ResponseEntity<String> handleException(Exception ex) {
+    return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ex.toString());
+}
+```
+
+**Dlaczego podatny?**  
+- Użytkownik otrzymuje pełny stacktrace, który może ujawnić szczegóły implementacji aplikacji.
+
+---
+
+### Zalecenia
+1. **Unikaj ujawniania logów użytkownikowi**:
+   ```java
+   @ExceptionHandler(Exception.class)
+   public ResponseEntity<String> handleException(Exception ex) {
+       return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("An unexpected error occurred.");
+   }
+   ```
+
+2. **Użyj centralnego systemu logowania**:
+   - Przechowuj logi w bezpiecznym miejscu, niedostępnym dla użytkowników końcowych.
+
+---
+
+</details>
+
+## A10:2021 Server Side Request Forgery (SSRF)
+
+<details>
+<summary>Server Side Request Forgery (SSRF)</summary>
+
+### Opis ogólny podatności
+Server Side Request Forgery (SSRF) to podatność umożliwiająca atakującemu zmuszenie serwera aplikacyjnego do wykonania nieautoryzowanego żądania HTTP. Atakujący może wykorzystać podatność do uzyskania dostępu do wewnętrznych zasobów serwera, takich jak bazy danych, API lub panele administracyjne. Problem pojawia się, gdy serwer wykonuje żądania HTTP na podstawie danych wejściowych użytkownika bez odpowiedniej walidacji.
+
+---
+
+### Potencjalne skutki
+- **Nieautoryzowany dostęp do wewnętrznych zasobów serwera**: możliwość odczytu lub modyfikacji danych.
+- **Wykorzystanie serwera jako pośrednika**: atakujący może używać serwera aplikacyjnego do przeprowadzania ataków na inne systemy.
+- **Skuteczne ataki na metadane instancji chmurowych**: w środowiskach chmurowych (np. AWS, Azure), SSRF może prowadzić do wycieku kluczy API lub innych danych uwierzytelniających.
+
+---
+
+### Zalecenia dla frameworka
+1. **Walidacja danych wejściowych**:
+   - Używaj białej listy zaufanych domen lub wzorców URL, aby ograniczyć źródła żądań.
+   - Sprawdzaj, czy żądania nie są kierowane do wewnętrznych adresów IP (np. `127.0.0.1`, `169.254.x.x`).
+
+2. **Ograniczenie uprawnień serwera**:
+   - Konfiguruj uprawnienia sieciowe tak, aby serwer aplikacyjny nie miał dostępu do wrażliwych zasobów wewnętrznych.
+
+3. **Monitorowanie i logowanie**:
+   - Rejestruj wszystkie żądania HTTP, szczególnie te inicjowane przez serwer, aby wykrywać podejrzane działania.
+
+4. **Ograniczenie możliwości korzystania z dynamicznych żądań HTTP**:
+   - Jeśli aplikacja nie wymaga dynamicznego tworzenia żądań HTTP na podstawie danych użytkownika, rozważ ich całkowite wyłączenie.
+
+5. **Regularne testowanie bezpieczeństwa**:
+   - Wdrażaj testy bezpieczeństwa w procesie CI/CD, aby identyfikować i eliminować podatności związane z SSRF.
+
+</details>
+
